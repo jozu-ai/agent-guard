@@ -1,0 +1,17 @@
+Jozu Agent Guard
+Copyright Jozu, Inc. All rights reserved.
+
+Jozu Agent Guard is proprietary, commercially licensed software. This
+repository only distributes compiled release artifacts. No source code is
+published here, and no open-source license is granted to the Jozu Agent
+Guard binary itself.
+
+The release binary embeds a Linux microVM image containing GPL and LGPL
+licensed components, built from unmodified upstream sources, along with
+various open-source Go and Node.js dependencies. Full attribution, license
+texts, and a written source offer for the GPL/LGPL components are included
+with every release as THIRD_PARTY_NOTICES.md, downloadable from this
+repository's Releases page.
+
+For licensing terms covering your use of Jozu Agent Guard, check your
+agreement with Jozu, Inc., or reach out to Jozu at https://jozu.com.
