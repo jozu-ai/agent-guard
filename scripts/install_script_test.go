@@ -415,55 +415,59 @@ func TestInstallBinaryEscalatesOnlyWhenNecessary(t *testing.T) {
 // this failure expensive rather than merely annoying: escalation used to be
 // discovered only after a 550MB download, and reported as a raw sudo error.
 // Anything driving the installer non-interactively -- MDM, a provisioning
-// script, a CI step -- has no terminal for sudo to prompt on, so the check
-// has to happen before the transfer.
+// script, a CI step -- has no terminal for sudo to prompt on.
 //
-// Go's exec gives the script no controlling terminal, which is exactly the
-// condition being tested.
+// The two conditions are supplied rather than borrowed from the machine, so
+// this runs everywhere instead of skipping: a sudo that reports a password
+// is required (GitHub's macOS runners have passwordless sudo, which would
+// otherwise skip this away), and no controlling terminal, which is already
+// true of anything Go's exec starts.
 func TestInstallScriptFailsFastWithoutEscalation(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: every directory is writable, so escalation is never needed")
 	}
-	if exec.Command("sudo", "-n", "true").Run() == nil {
-		t.Skip("passwordless sudo is configured: escalation needs no terminal here")
-	}
 
-	// A root-owned directory that exists on every mac and that this user
-	// cannot write to, so the script must escalate to install into it.
-	const rootOwned = "/usr/local/bin"
-	if unix_writable(rootOwned) {
-		t.Skipf("%s is writable by this user, so no escalation is required", rootOwned)
+	root := t.TempDir()
+
+	// An install directory the user cannot create, because its parent is
+	// not writable.
+	locked := filepath.Join(root, "locked")
+	if err := os.MkdirAll(locked, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o755) }) //nolint:errcheck
+	installDir := filepath.Join(locked, "bin")
+
+	// A sudo that always reports it needs a password, never escalating.
+	shimDir := filepath.Join(root, "shim")
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shim := "#!/bin/bash\necho 'sudo: a password is required' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(shimDir, "sudo"), []byte(shim), 0o755); err != nil {
+		t.Fatal(err)
 	}
 
 	start := time.Now()
-	got := runInstall(t, rootOwned)
+	got := runInstall(t, installDir, "PATH="+shimDir+":"+os.Getenv("PATH"))
 	elapsed := time.Since(start)
 
 	if got.exitCode == 0 {
 		t.Fatalf("install reported success without being able to escalate\noutput:\n%s", got.output)
 	}
-	// Downloading half a gigabyte takes far longer than this even on a fast
-	// link, so a quick failure is the evidence that it bailed out first.
+	// Half a gigabyte takes far longer than this on any link, so a quick
+	// failure is the evidence that it bailed out before transferring.
 	if elapsed > 20*time.Second {
-		t.Errorf("took %s to fail, which means it downloaded before checking it could install", elapsed)
+		t.Errorf("took %s to fail, so it downloaded before checking it could install", elapsed)
+	}
+	if strings.Contains(got.output, "Downloading") {
+		t.Errorf("started the download before checking it could install\noutput:\n%s", got.output)
 	}
 	for _, want := range []string{"no terminal", "sudo", "INSTALL_DIR"} {
 		if !strings.Contains(got.output, want) {
 			t.Errorf("error message does not mention %q, so the reader cannot act on it\noutput:\n%s", want, got.output)
 		}
 	}
-}
-
-// unix_writable reports whether the current user can create a file in dir.
-func unix_writable(dir string) bool {
-	f, err := os.CreateTemp(dir, ".agentguard-write-probe")
-	if err != nil {
-		return false
-	}
-	name := f.Name()
-	f.Close()       //nolint:errcheck
-	os.Remove(name) //nolint:errcheck
-	return true
 }
 
 // TestAssetURL pins the URL forms. The redirect endpoints below are chosen
