@@ -41,6 +41,12 @@ EXPECTED_TEAM_ID="PMHBCVV9C2"
 # resolving it through PATH would make the gate only as trustworthy as PATH
 # (a poisoned profile could drop in an `exit 0` shim). /usr/bin/codesign is
 # SIP-protected. Same reasoning as pkg/selfupdate's codesignPath.
+#
+# codesign ships with macOS itself, so requiring it costs the user nothing:
+# it is a real binary in /usr/bin linked against CodesignKit and
+# AppleMobileFileIntegrity, not one of the Xcode Command Line Tools shims
+# (those are hardlinks to a stub that links libxcselect and prompt to
+# install the CLT on first use).
 CODESIGN="/usr/bin/codesign"
 
 # Download needs room for the binary; the install directory needs room for
@@ -284,12 +290,17 @@ main() {
     esac
   fi
 
-  # Global, not local: the EXIT trap fires after main returns, and a local
-  # would be out of scope by then -- which under `set -u` turns a successful
-  # install's final act into an "unbound variable" error and leaks the
-  # download.
-  workdir="$(mktemp -d)"
+  # Arm the trap before creating the directory, not after: in between, a
+  # signal would leave the download behind with nothing registered to
+  # remove it. cleanup tolerates an empty workdir precisely so it can be
+  # armed first.
+  #
+  # workdir is global, not local, because the EXIT trap fires after main
+  # returns -- a local would be out of scope by then, which under `set -u`
+  # turns a successful install's final act into an "unbound variable" error
+  # and leaks the download.
   trap cleanup EXIT
+  workdir="$(mktemp -d)"
 
   require_space "$workdir" "The temporary directory ($workdir)"
   require_space "$INSTALL_DIR" "$INSTALL_DIR"

@@ -16,13 +16,15 @@ No GitHub account, no extra tooling, no authentication:
 curl -fsSL https://raw.githubusercontent.com/jozu-ai/agent-guard/main/scripts/install.sh | bash
 ```
 
-The script downloads the release binary (about 550 MB), checks it against the published SHA-256, verifies it carries Jozu's Apple Developer ID signature, and installs it to `/usr/local/bin`. Set `INSTALL_DIR` to install elsewhere, or `VERSION` to pin a specific release:
+The script downloads the release binary (about 550 MB), checks it against the published SHA-256 when the release includes `checksums.txt`, requires that it carries Jozu's Apple Developer ID signature, and installs it to `/usr/local/bin`. The signature is the gate that can fail an install; the checksum is defense in depth. Set `INSTALL_DIR` to install elsewhere, or `VERSION` to pin a specific release:
 
 ```bash
 VERSION=v0.7.1 curl -fsSL https://raw.githubusercontent.com/jozu-ai/agent-guard/main/scripts/install.sh | bash
 ```
 
-If the machine cannot reach github.com directly, re-host `agentguard` and `checksums.txt` on an internal server and point the script at them with `AGENTGUARD_BASE_URL`. The checksum and signature checks still apply.
+If the machine cannot reach github.com directly, re-host `agentguard` and `checksums.txt` on an internal server (https only) and point the script at them with `AGENTGUARD_BASE_URL`. The checksum and signature checks still apply.
+
+Two limits to know before relying on an internal mirror. The location is not remembered: it applies to the install that used it, and `agentguard update` still expects to reach this repository's Releases page. And verification pins Jozu's signing identity rather than a version, so a mirror left stale keeps serving whatever signed release it holds.
 
 Once installed, `agentguard update` installs later releases in place.
 
