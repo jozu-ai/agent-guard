@@ -1,0 +1,39 @@
+name: CI
+
+# install.sh in this repository is the script users pipe into a shell. It is
+# the first thing anyone runs, it decides what to download, and it is what
+# refuses a binary that is not signed by Jozu, so every change to it gets
+# tested before it can reach main.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  install-script:
+    name: Install script
+    # macOS because the signature gate shells out to codesign, and arm64
+    # because that is what the released binary targets. The tests are
+    # offline: they serve crafted releases from an httptest mirror, so no
+    # 550MB download and no dependency on the Releases page being reachable.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+
+      - uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Shell syntax
+        run: bash -n scripts/install.sh
+
+      - name: Installer tests
+        run: go test ./scripts/ -v

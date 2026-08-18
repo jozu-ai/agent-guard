@@ -80,6 +80,31 @@ require_space() {
   fi
 }
 
+# require_https refuses a plaintext base URL. The signature gate below is
+# what actually stops a hostile mirror from installing foreign code, but
+# plaintext still lets a network attacker choose *which* genuinely signed
+# release you get, which is a downgrade to a known-vulnerable version.
+# Loopback is exempt so an internal mirror can be smoke-tested before its
+# TLS is in place.
+require_https() {
+  case "$1" in
+    https://*) ;;
+    http://127.0.0.1*|http://localhost*|http://\[::1\]*) ;;
+    *) error "AGENTGUARD_BASE_URL must use https (got $1)" ;;
+  esac
+}
+
+# source_label names where the binary is about to come from, so an install
+# that silently reads a stale AGENTGUARD_BASE_URL from the environment is
+# visible rather than mysterious.
+source_label() {
+  if [ -n "${AGENTGUARD_BASE_URL:-}" ]; then
+    printf '%s' "${AGENTGUARD_BASE_URL%/}"
+  else
+    printf 'https://github.com/%s (%s)' "$REPO" "${TAG:-latest release}"
+  fi
+}
+
 # asset_url builds the public download URL for one release asset. The
 # /releases/latest/download/ and /releases/download/<tag>/ forms are plain
 # redirects -- deliberately not the REST API, which is rate-limited to 60
@@ -224,7 +249,12 @@ installed_path=""
 install_binary() {
   local src="$1" dest="$INSTALL_DIR/$ASSET"
 
-  if [ -d "$INSTALL_DIR" ] && [ -w "$INSTALL_DIR" ]; then
+  # `mkdir -p` first, then test writability: requiring the directory to
+  # already exist sent every install to a missing-but-creatable path (a
+  # fresh ~/.local/bin, say) down the sudo branch, which prompts for a
+  # password nobody needed and leaves a root-owned directory in the user's
+  # home. Escalate only when creating or writing it genuinely fails.
+  if mkdir -p "$INSTALL_DIR" 2>/dev/null && [ -w "$INSTALL_DIR" ]; then
     mv -f "$src" "$dest"
   else
     info "Installing to $INSTALL_DIR (requires sudo)..."
@@ -264,6 +294,12 @@ main() {
   require_space "$workdir" "The temporary directory ($workdir)"
   require_space "$INSTALL_DIR" "$INSTALL_DIR"
 
+  if [ -n "${AGENTGUARD_BASE_URL:-}" ]; then
+    require_https "$AGENTGUARD_BASE_URL"
+    warn "Installing from a custom source. Verification pins Jozu's signing identity, not the version, so a stale mirror can serve an older signed release."
+  fi
+
+  info "Source: $(source_label)"
   info "Downloading agentguard ${TAG:-(latest)} -- about 550MB..."
   fetch "$(asset_url "$ASSET")" "$workdir/$ASSET"
 
