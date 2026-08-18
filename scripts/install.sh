@@ -37,9 +37,16 @@ REPO="jozu-ai/agent-guard"
 # produce an install the user cannot run; it is only chosen when the caller
 # already has it on PATH, which is exactly the case where sudo is pure
 # friction.
+# The system directory is a parameter with the real default, not a hidden
+# environment override: it lets the tests exercise all three outcomes on a
+# machine whose /usr/local/bin happens to be writable (an Intel-Homebrew
+# migration, or a GitHub runner) without production behavior depending on
+# anything the caller sets.
 default_install_dir() {
-  if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
-    printf '/usr/local/bin'
+  local system_dir="${1:-/usr/local/bin}"
+
+  if [ -d "$system_dir" ] && [ -w "$system_dir" ]; then
+    printf '%s' "$system_dir"
     return
   fi
   case ":$PATH:" in
@@ -48,7 +55,7 @@ default_install_dir() {
       return
       ;;
   esac
-  printf '/usr/local/bin'
+  printf '%s' "$system_dir"
 }
 
 INSTALL_DIR="${INSTALL_DIR:-$(default_install_dir)}"

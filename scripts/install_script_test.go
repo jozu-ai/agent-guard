@@ -497,63 +497,87 @@ func TestInstallScriptFailsFastWithoutEscalation(t *testing.T) {
 // worse, an install the user cannot run: ~/.local/bin is not on macOS's
 // stock PATH (see /etc/paths), so it is only a valid target when the caller
 // already has it there.
+// systemDirPlaceholder marks a case whose expected answer is the test's
+// stand-in for /usr/local/bin, whose path is only known at run time.
+const systemDirPlaceholder = "<system-dir>"
+
 func TestDefaultInstallDir(t *testing.T) {
 	cases := []struct {
-		name string
-		path string
-		home string
-		want string
-		why  string
+		name       string
+		path       string
+		home       string
+		systemMode os.FileMode // mode of the stand-in for /usr/local/bin
+		want       string      // systemDirPlaceholder means "the stand-in"
+		why        string
 	}{
 		{
-			name: "on a stock PATH",
-			path: "/usr/bin:/bin:/usr/sbin:/sbin",
-			home: "/Users/someone",
-			want: "/usr/local/bin",
-			why:  "nothing else is guaranteed to be found, even though it costs a sudo prompt",
+			name:       "system directory is writable",
+			path:       "/usr/bin:/bin",
+			home:       "/Users/someone",
+			systemMode: 0o755,
+			want:       systemDirPlaceholder,
+			why:        "it is on the stock PATH and needs no password, so nothing beats it",
 		},
 		{
-			name: "caller already has ~/.local/bin on PATH",
-			path: "/Users/someone/.local/bin:/usr/bin:/bin",
-			home: "/Users/someone",
-			want: "/Users/someone/.local/bin",
-			why:  "it will be found there, and installing needs no password",
+			name:       "root-owned system directory, stock PATH",
+			path:       "/usr/bin:/bin:/usr/sbin:/sbin",
+			home:       "/Users/someone",
+			systemMode: 0o555,
+			want:       systemDirPlaceholder,
+			why:        "nothing else is guaranteed to be found, even though it costs a sudo prompt",
 		},
 		{
-			name: "~/.local/bin exists but is not on PATH",
-			path: "/usr/bin:/bin",
-			home: t.TempDir(),
-			want: "/usr/local/bin",
-			why:  "installing somewhere off PATH produces a binary the user cannot run",
+			name:       "root-owned system directory, ~/.local/bin on PATH",
+			path:       "/Users/someone/.local/bin:/usr/bin:/bin",
+			home:       "/Users/someone",
+			systemMode: 0o555,
+			want:       "/Users/someone/.local/bin",
+			why:        "it will be found there, and installing needs no password",
+		},
+		{
+			name:       "root-owned system directory, ~/.local/bin not on PATH",
+			path:       "/usr/bin:/bin",
+			home:       t.TempDir(),
+			systemMode: 0o555,
+			want:       systemDirPlaceholder,
+			why:        "installing off PATH produces a binary the user's shell cannot find",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.name == "~/.local/bin exists but is not on PATH" {
+			// The ~/.local/bin-not-on-PATH case needs the directory to
+			// exist, to prove existence alone is not enough.
+			if strings.HasSuffix(tc.name, "not on PATH") {
 				if err := os.MkdirAll(filepath.Join(tc.home, ".local", "bin"), 0o755); err != nil {
 					t.Fatal(err)
 				}
 			}
-			// A writable /usr/local/bin (an Intel-Homebrew-migrated Mac,
-			// say) short-circuits the choice before ~/.local/bin is ever
-			// considered. Only the case that expects ~/.local/bin is
-			// affected; the two that expect /usr/local/bin stay valid, so
-			// skip narrowly rather than dropping the whole table. Decide
-			// before running, not after.
-			if tc.want != "/usr/local/bin" && unixWritable("/usr/local/bin") {
-				t.Skip("/usr/local/bin is writable on this machine, so it takes precedence over ~/.local/bin")
+			// Stand in for /usr/local/bin with a directory this test
+			// controls, so all three outcomes are exercised even where the
+			// real one is writable (an Intel-Homebrew-migrated Mac, or a
+			// GitHub runner). Skipping there left the no-password path --
+			// the one most developers take -- untested on CI.
+			systemDir := filepath.Join(t.TempDir(), "usr-local-bin")
+			if err := os.MkdirAll(systemDir, tc.systemMode); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Chmod(systemDir, 0o755) }) //nolint:errcheck
+
+			want := tc.want
+			if want == systemDirPlaceholder {
+				want = systemDir
 			}
 
-			script := fmt.Sprintf(`source %q >/dev/null 2>&1; default_install_dir`, installScript(t))
+			script := fmt.Sprintf(`source %q >/dev/null 2>&1; default_install_dir %q`, installScript(t), systemDir)
 			cmd := exec.Command("/bin/bash", "-c", script)
 			cmd.Env = []string{"PATH=" + tc.path, "HOME=" + tc.home}
 			out, err := cmd.Output()
 			if err != nil {
 				t.Fatalf("default_install_dir: %v", err)
 			}
-			if got := strings.TrimSpace(string(out)); got != tc.want {
-				t.Errorf("default_install_dir = %q, want %q (%s)", got, tc.want, tc.why)
+			if got := strings.TrimSpace(string(out)); got != want {
+				t.Errorf("default_install_dir = %q, want %q (%s)", got, want, tc.why)
 			}
 		})
 	}
