@@ -408,7 +408,7 @@ func TestInstallBinaryEscalatesOnlyWhenNecessary(t *testing.T) {
 				`source %q >/dev/null 2>&1; set +e; INSTALL_DIR=%q; install_binary %q >/dev/null 2>&1; printf '%%s' "$installed_path"`,
 				installScript(t), installDir, payload)
 			cmd := exec.Command("/bin/bash", "-c", script)
-			cmd.Env = append(os.Environ(), "PATH="+shimDir+":"+os.Getenv("PATH"))
+			cmd.Env = []string{"PATH=" + shimDir + ":" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
 			out, err := cmd.Output()
 			if err != nil {
 				t.Fatalf("install_binary failed: %v", err)
@@ -730,7 +730,11 @@ func TestAssetURL(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			script := fmt.Sprintf(`source %q >/dev/null 2>&1; TAG=%q; asset_url agentguard`, installScript(t), tc.tag)
 			cmd := exec.Command("/bin/bash", "-c", script)
-			cmd.Env = append(os.Environ(), tc.env...)
+			// Explicit, not inherited: an exported AGENTGUARD_BASE_URL --
+			// likely for anyone testing the internal-mirror path -- would
+			// otherwise redirect the default cases and fail them for a
+			// reason that has nothing to do with the code.
+			cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}, tc.env...)
 			out, err := cmd.Output()
 			if err != nil {
 				t.Fatalf("asset_url: %v", err)
