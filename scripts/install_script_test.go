@@ -470,6 +470,80 @@ func TestInstallScriptFailsFastWithoutEscalation(t *testing.T) {
 	}
 }
 
+// TestDefaultInstallDir covers where the binary lands when the caller says
+// nothing. Getting this wrong is either a password prompt nobody needed or,
+// worse, an install the user cannot run: ~/.local/bin is not on macOS's
+// stock PATH (see /etc/paths), so it is only a valid target when the caller
+// already has it there.
+func TestDefaultInstallDir(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		home string
+		want string
+		why  string
+	}{
+		{
+			name: "on a stock PATH",
+			path: "/usr/bin:/bin:/usr/sbin:/sbin",
+			home: "/Users/someone",
+			want: "/usr/local/bin",
+			why:  "nothing else is guaranteed to be found, even though it costs a sudo prompt",
+		},
+		{
+			name: "caller already has ~/.local/bin on PATH",
+			path: "/Users/someone/.local/bin:/usr/bin:/bin",
+			home: "/Users/someone",
+			want: "/Users/someone/.local/bin",
+			why:  "it will be found there, and installing needs no password",
+		},
+		{
+			name: "~/.local/bin exists but is not on PATH",
+			path: "/usr/bin:/bin",
+			home: t.TempDir(),
+			want: "/usr/local/bin",
+			why:  "installing somewhere off PATH produces a binary the user cannot run",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "~/.local/bin exists but is not on PATH" {
+				if err := os.MkdirAll(filepath.Join(tc.home, ".local", "bin"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			script := fmt.Sprintf(`source %q >/dev/null 2>&1; default_install_dir`, installScript(t))
+			cmd := exec.Command("/bin/bash", "-c", script)
+			cmd.Env = []string{"PATH=" + tc.path, "HOME=" + tc.home}
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("default_install_dir: %v", err)
+			}
+			// A writable /usr/local/bin (Intel Homebrew, say) short-circuits
+			// the choice, and this test cannot control that.
+			if _, statErr := os.Stat("/usr/local/bin"); statErr == nil && unixWritable("/usr/local/bin") {
+				t.Skip("/usr/local/bin is writable on this machine, which takes precedence")
+			}
+			if got := strings.TrimSpace(string(out)); got != tc.want {
+				t.Errorf("default_install_dir = %q, want %q (%s)", got, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+// unixWritable reports whether the current user can create a file in dir.
+func unixWritable(dir string) bool {
+	f, err := os.CreateTemp(dir, ".agentguard-probe")
+	if err != nil {
+		return false
+	}
+	name := f.Name()
+	f.Close()       //nolint:errcheck
+	os.Remove(name) //nolint:errcheck
+	return true
+}
+
 // TestAssetURL pins the URL forms. The redirect endpoints below are chosen
 // over the REST API because the API rate-limits unauthenticated callers to
 // 60 requests/hour per IP, which a whole office behind one NAT would share.

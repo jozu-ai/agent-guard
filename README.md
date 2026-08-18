@@ -16,7 +16,9 @@ No GitHub account, no extra tooling, no authentication:
 curl -fsSL https://raw.githubusercontent.com/jozu-ai/agent-guard/main/scripts/install.sh | bash
 ```
 
-The script downloads the release binary (about 550 MB), checks it against the published SHA-256 when the release includes `checksums.txt`, requires that it carries Jozu's Apple Developer ID signature, and installs it to `/usr/local/bin`. The signature is the gate that can fail an install; the checksum is defense in depth. Set `INSTALL_DIR` to install elsewhere, or `VERSION` to pin a specific release:
+The script downloads the release binary (about 550 MB), checks it against the published SHA-256 when the release includes `checksums.txt`, requires that it carries Jozu's Apple Developer ID signature, and installs it. The signature is the gate that can fail an install; the checksum is defense in depth.
+
+It installs to `~/.local/bin` when that is already on your PATH, which needs no password, and otherwise to `/usr/local/bin`, which is the only location on macOS's stock PATH and is root-owned, so it asks for your sudo password. Set `INSTALL_DIR` to choose for yourself. Set `INSTALL_DIR` to install elsewhere, or `VERSION` to pin a specific release:
 
 ```bash
 VERSION=v0.7.1 curl -fsSL https://raw.githubusercontent.com/jozu-ai/agent-guard/main/scripts/install.sh | bash

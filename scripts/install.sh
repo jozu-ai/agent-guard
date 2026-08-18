@@ -12,7 +12,8 @@
 #
 # Environment overrides:
 #   VERSION      Release tag to install (e.g. v0.7.1). Defaults to latest.
-#   INSTALL_DIR  Where to put the binary. Defaults to /usr/local/bin.
+#   INSTALL_DIR  Where to put the binary. Defaults to ~/.local/bin when that
+#                is already on your PATH, otherwise /usr/local/bin.
 #   AGENTGUARD_BASE_URL
 #                Directory URL holding `agentguard` and `checksums.txt`, for
 #                organizations that re-host release artifacts internally
@@ -26,7 +27,31 @@ set -euo pipefail
 # every prospect and most employees.
 REPO="jozu-ai/agent-guard"
 
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+# default_install_dir picks somewhere the binary will actually be found,
+# preferring a location that needs no password.
+#
+# /usr/local/bin is the only directory on macOS's stock PATH (see
+# /etc/paths) that software installs into, which is why it is the fallback
+# even though Apple Silicon leaves it root-owned and therefore needs sudo.
+# ~/.local/bin is NOT on the stock PATH, so installing there blind would
+# produce an install the user cannot run; it is only chosen when the caller
+# already has it on PATH, which is exactly the case where sudo is pure
+# friction.
+default_install_dir() {
+  if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
+    printf '/usr/local/bin'
+    return
+  fi
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*)
+      printf '%s/.local/bin' "$HOME"
+      return
+      ;;
+  esac
+  printf '/usr/local/bin'
+}
+
+INSTALL_DIR="${INSTALL_DIR:-$(default_install_dir)}"
 
 ASSET="agentguard"
 CHECKSUMS_ASSET="checksums.txt"
