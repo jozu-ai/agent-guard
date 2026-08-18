@@ -31,6 +31,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // expectedTeamID is Jozu's Apple Developer ID team. The development repo
@@ -408,6 +409,61 @@ func TestInstallBinaryEscalatesOnlyWhenNecessary(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestInstallScriptFailsFastWithoutEscalation covers the ordering that makes
+// this failure expensive rather than merely annoying: escalation used to be
+// discovered only after a 550MB download, and reported as a raw sudo error.
+// Anything driving the installer non-interactively -- MDM, a provisioning
+// script, a CI step -- has no terminal for sudo to prompt on, so the check
+// has to happen before the transfer.
+//
+// Go's exec gives the script no controlling terminal, which is exactly the
+// condition being tested.
+func TestInstallScriptFailsFastWithoutEscalation(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: every directory is writable, so escalation is never needed")
+	}
+	if exec.Command("sudo", "-n", "true").Run() == nil {
+		t.Skip("passwordless sudo is configured: escalation needs no terminal here")
+	}
+
+	// A root-owned directory that exists on every mac and that this user
+	// cannot write to, so the script must escalate to install into it.
+	const rootOwned = "/usr/local/bin"
+	if unix_writable(rootOwned) {
+		t.Skipf("%s is writable by this user, so no escalation is required", rootOwned)
+	}
+
+	start := time.Now()
+	got := runInstall(t, rootOwned)
+	elapsed := time.Since(start)
+
+	if got.exitCode == 0 {
+		t.Fatalf("install reported success without being able to escalate\noutput:\n%s", got.output)
+	}
+	// Downloading half a gigabyte takes far longer than this even on a fast
+	// link, so a quick failure is the evidence that it bailed out first.
+	if elapsed > 20*time.Second {
+		t.Errorf("took %s to fail, which means it downloaded before checking it could install", elapsed)
+	}
+	for _, want := range []string{"no terminal", "sudo", "INSTALL_DIR"} {
+		if !strings.Contains(got.output, want) {
+			t.Errorf("error message does not mention %q, so the reader cannot act on it\noutput:\n%s", want, got.output)
+		}
+	}
+}
+
+// unix_writable reports whether the current user can create a file in dir.
+func unix_writable(dir string) bool {
+	f, err := os.CreateTemp(dir, ".agentguard-write-probe")
+	if err != nil {
+		return false
+	}
+	name := f.Name()
+	f.Close()       //nolint:errcheck
+	os.Remove(name) //nolint:errcheck
+	return true
 }
 
 // TestAssetURL pins the URL forms. The redirect endpoints below are chosen

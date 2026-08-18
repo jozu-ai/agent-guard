@@ -111,6 +111,39 @@ source_label() {
   fi
 }
 
+# require_install_access fails before the download rather than after it.
+# Escalation is decided at the end of a 550MB transfer, and a machine with
+# no controlling terminal -- an MDM run, a provisioning script, a CI step,
+# anything driving this non-interactively -- cannot answer sudo's password
+# prompt. Discovering that after the transfer wastes the transfer and
+# reports it as a raw sudo error, so check up front.
+require_install_access() {
+  # Already writable, or creatable by this user: no escalation needed.
+  if mkdir -p "$INSTALL_DIR" 2>/dev/null && [ -w "$INSTALL_DIR" ]; then
+    return 0
+  fi
+
+  command -v sudo >/dev/null 2>&1 || error "$INSTALL_DIR is not writable and sudo is not available.
+  Set INSTALL_DIR to a directory you own, e.g. INSTALL_DIR=\$HOME/.local/bin"
+
+  # Passwordless sudo, or a terminal on which sudo can prompt. sudo reads
+  # the password from /dev/tty, not stdin, which is why this tests the
+  # terminal rather than stdin -- under `curl | bash` stdin is the script
+  # itself, and prompting still works fine.
+  if sudo -n true 2>/dev/null; then
+    return 0
+  fi
+  if [ -c /dev/tty ] && { : < /dev/tty; } 2>/dev/null; then
+    return 0
+  fi
+
+  error "$INSTALL_DIR needs sudo to write to, but there is no terminal to ask for a password on.
+  Either run this with sudo already granted:
+      sudo INSTALL_DIR=$INSTALL_DIR bash install.sh
+  or install somewhere you own:
+      INSTALL_DIR=\$HOME/.local/bin"
+}
+
 # asset_url builds the public download URL for one release asset. The
 # /releases/latest/download/ and /releases/download/<tag>/ forms are plain
 # redirects -- deliberately not the REST API, which is rate-limited to 60
@@ -304,6 +337,7 @@ main() {
 
   require_space "$workdir" "The temporary directory ($workdir)"
   require_space "$INSTALL_DIR" "$INSTALL_DIR"
+  require_install_access
 
   if [ -n "${AGENTGUARD_BASE_URL:-}" ]; then
     require_https "$AGENTGUARD_BASE_URL"
