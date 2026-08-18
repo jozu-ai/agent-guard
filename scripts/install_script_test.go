@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -112,14 +113,27 @@ func runInstall(t *testing.T, installDir string, env ...string) runResult {
 
 	tmp := t.TempDir()
 	cmd := exec.Command("/bin/bash", installScript(t))
-	cmd.Env = append(os.Environ(),
-		"INSTALL_DIR="+installDir,
-		// Private TMPDIR: the cleanup assertions count what the script
-		// leaves behind, and a shared /tmp makes that answer depend on
-		// whatever else is running on the machine.
-		"TMPDIR="+tmp,
-	)
-	cmd.Env = append(cmd.Env, env...)
+
+	// Explicit environment rather than os.Environ(): an exported
+	// AGENTGUARD_BASE_URL or VERSION in the developer's shell -- entirely
+	// plausible for anyone exercising the internal-mirror path -- would
+	// silently redirect these cases and make them pass or fail for the
+	// wrong reason.
+	cmd.Env = append([]string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + os.Getenv("HOME"),
+		"INSTALL_DIR=" + installDir,
+		// Private TMPDIR: the cleanup assertion inspects what the script
+		// leaves behind, and a shared temp makes that depend on whatever
+		// else is running on the machine.
+		"TMPDIR=" + tmp,
+	}, env...)
+
+	// Detach the controlling terminal. Go's exec does not call setsid, so
+	// without this the child inherits the terminal of whoever ran `go
+	// test`, and any case that depends on sudo having nowhere to prompt
+	// would behave one way on CI and another way on a developer's machine.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	out, err := cmd.CombinedOutput()
 	code := 0
@@ -130,7 +144,10 @@ func runInstall(t *testing.T, installDir string, env ...string) runResult {
 	}
 
 	// Nothing the script downloads may outlive it, whatever the outcome.
-	leftovers, _ := filepath.Glob(filepath.Join(tmp, "tmp.*"))
+	// The pattern has to match the script's mktemp template: BSD mktemp
+	// ignores $TMPDIR when called without one, so an earlier version of
+	// this assertion silently matched nothing on every run.
+	leftovers, _ := filepath.Glob(filepath.Join(tmp, "agentguard.*"))
 	if len(leftovers) > 0 {
 		t.Errorf("install.sh left temp directories behind: %v\noutput:\n%s", leftovers, out)
 	}
@@ -295,7 +312,12 @@ func TestInstallScriptReportsItsSource(t *testing.T) {
 }
 
 func TestInstallScriptMissingRelease(t *testing.T) {
-	got := runInstall(t, filepath.Join(t.TempDir(), "bin"), "VERSION=v9.9.9")
+	// An empty mirror 404s every asset, which is what a nonexistent release
+	// looks like. Pointing at github.com instead would make this gate on
+	// the file every customer runs depend on GitHub being reachable from
+	// the runner.
+	base := mirror(t, map[string][]byte{})
+	got := runInstall(t, filepath.Join(t.TempDir(), "bin"), "AGENTGUARD_BASE_URL="+base)
 
 	if got.exitCode == 0 {
 		t.Fatalf("installing a nonexistent version succeeded\noutput:\n%s", got.output)
@@ -513,17 +535,22 @@ func TestDefaultInstallDir(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			// A writable /usr/local/bin (an Intel-Homebrew-migrated Mac,
+			// say) short-circuits the choice before ~/.local/bin is ever
+			// considered. Only the case that expects ~/.local/bin is
+			// affected; the two that expect /usr/local/bin stay valid, so
+			// skip narrowly rather than dropping the whole table. Decide
+			// before running, not after.
+			if tc.want != "/usr/local/bin" && unixWritable("/usr/local/bin") {
+				t.Skip("/usr/local/bin is writable on this machine, so it takes precedence over ~/.local/bin")
+			}
+
 			script := fmt.Sprintf(`source %q >/dev/null 2>&1; default_install_dir`, installScript(t))
 			cmd := exec.Command("/bin/bash", "-c", script)
 			cmd.Env = []string{"PATH=" + tc.path, "HOME=" + tc.home}
 			out, err := cmd.Output()
 			if err != nil {
 				t.Fatalf("default_install_dir: %v", err)
-			}
-			// A writable /usr/local/bin (Intel Homebrew, say) short-circuits
-			// the choice, and this test cannot control that.
-			if _, statErr := os.Stat("/usr/local/bin"); statErr == nil && unixWritable("/usr/local/bin") {
-				t.Skip("/usr/local/bin is writable on this machine, which takes precedence")
 			}
 			if got := strings.TrimSpace(string(out)); got != tc.want {
 				t.Errorf("default_install_dir = %q, want %q (%s)", got, tc.want, tc.why)
@@ -542,6 +569,111 @@ func unixWritable(dir string) bool {
 	f.Close()       //nolint:errcheck
 	os.Remove(name) //nolint:errcheck
 	return true
+}
+
+// TestRequireHTTPS pins which sources may be fetched over cleartext. The
+// loopback exemption exists only so a mirror can be tested before its TLS
+// is up; written as a prefix glob it also matched 127.0.0.1.evil.com and
+// localhost.attacker.io, handing a remote attacker the downgrade the https
+// requirement exists to prevent.
+func TestRequireHTTPS(t *testing.T) {
+	cases := []struct {
+		url   string
+		allow bool
+	}{
+		{"https://artifacts.example.com/agentguard", true},
+		{"http://127.0.0.1:8799/x", true},
+		{"http://localhost:8080/x", true},
+		{"http://[::1]:9/x", true},
+		{"http://127.0.0.1.evil.com/x", false},
+		{"http://localhost.attacker.io/x", false},
+		{"http://127.0.0.1@evil.com/x", false},
+		{"http://127.0.0.1evil.com/x", false},
+		{"http://evil.com/x", false},
+		{"ftp://example.com/x", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.url, func(t *testing.T) {
+			script := fmt.Sprintf(`source %q >/dev/null 2>&1; require_https %q`, installScript(t), tc.url)
+			cmd := exec.Command("/bin/bash", "-c", script)
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
+			err := cmd.Run()
+			if allowed := err == nil; allowed != tc.allow {
+				t.Errorf("require_https(%q) allowed=%v, want %v", tc.url, allowed, tc.allow)
+			}
+		})
+	}
+}
+
+// TestVerifyChecksumNameForms covers the spellings a checksums.txt can carry.
+// Exact equality on the raw second field turned a release-tooling change
+// (sha256sum -b, or generating from a dist/ tree) into a silently skipped
+// checksum rather than a failure.
+func TestVerifyChecksumNameForms(t *testing.T) {
+	tmpd := t.TempDir()
+	payload := filepath.Join(tmpd, "agentguard")
+	if err := os.WriteFile(payload, []byte("payload\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256Hex([]byte("payload\n"))
+
+	cases := []struct {
+		name    string
+		line    string
+		matched bool
+	}{
+		{"plain", sum + "  agentguard", true},
+		{"binary mode prefix", sum + " *agentguard", true},
+		{"generated from a dist tree", sum + "  dist/agentguard", true},
+		{"a different asset entirely", sum + "  agentguard.zip", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sums := filepath.Join(tmpd, tc.name+".txt")
+			if err := os.WriteFile(sums, []byte(tc.line+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			out := run_isolated(t, fmt.Sprintf("verify_checksum %q %q agentguard", payload, sums))
+			// A matched entry reports the verification; an unmatched one
+			// falls back to the signature gate with a warning.
+			if tc.matched && !strings.Contains(out, "Checksum verified") {
+				t.Errorf("entry %q was not matched, so the checksum was silently skipped\noutput: %s", tc.line, out)
+			}
+			if !tc.matched && !strings.Contains(out, "no entry for") {
+				t.Errorf("entry %q should not have matched agentguard\noutput: %s", tc.line, out)
+			}
+		})
+	}
+}
+
+// TestFailedInstallLeavesNoDirectory covers a promise the script makes about
+// itself: a refused install touches nothing. Probing writability by calling
+// mkdir -p meant every rejected download still created INSTALL_DIR.
+func TestFailedInstallLeavesNoDirectory(t *testing.T) {
+	root := t.TempDir()
+	installDir := filepath.Join(root, "typo", "bin")
+	base := mirror(t, map[string][]byte{}) // 404s everything
+
+	got := runInstall(t, installDir, "AGENTGUARD_BASE_URL="+base)
+	if got.exitCode == 0 {
+		t.Fatalf("install of a nonexistent asset reported success\noutput:\n%s", got.output)
+	}
+	if _, err := os.Stat(filepath.Join(root, "typo")); err == nil {
+		t.Errorf("a refused install created %s and left it behind", filepath.Join(root, "typo"))
+	}
+}
+
+// run_isolated runs one snippet against the sourced script and returns its
+// combined output.
+func run_isolated(t *testing.T, snippet string) string {
+	t.Helper()
+	script := fmt.Sprintf(`source %q >/dev/null 2>&1; set +e; %s`, installScript(t), snippet)
+	cmd := exec.Command("/bin/bash", "-c", script)
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
+	out, _ := cmd.CombinedOutput()
+	return string(out)
 }
 
 // TestAssetURL pins the URL forms. The redirect endpoints below are chosen

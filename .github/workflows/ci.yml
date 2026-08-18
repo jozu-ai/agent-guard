@@ -21,10 +21,15 @@ jobs:
   install-script:
     name: Install script
     # macOS because the signature gate shells out to codesign, and arm64
-    # because that is what the released binary targets. The tests are
-    # offline: they serve crafted releases from an httptest mirror, so no
-    # 550MB download and no dependency on the Releases page being reachable.
+    # because that is what the released binary targets. Every case serves
+    # its release from a local httptest mirror, including the
+    # nonexistent-version one, so the suite neither downloads 550MB nor
+    # depends on github.com being reachable from the runner.
     runs-on: macos-latest
+    # The suite runs in seconds. A cap well above that turns a hang -- a
+    # wedged download, a test that unexpectedly reaches the network -- into
+    # a fast red instead of sitting at the 6 hour job default.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
 

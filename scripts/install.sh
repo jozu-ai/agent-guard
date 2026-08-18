@@ -2,7 +2,7 @@
 #
 # AgentGuard installer for macOS on Apple Silicon.
 #
-#   curl -fsSL https://github.com/jozu-ai/agent-guard/releases/latest/download/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/jozu-ai/agent-guard/main/scripts/install.sh | bash
 #
 # Everything this script fetches is public: no GitHub account, no `gh` CLI,
 # no token, and no membership of the jozu-ai org. That matters because the
@@ -98,13 +98,19 @@ require_platform() {
 
 # require_space fails early rather than after a multi-hundred-MB download
 # that dies partway through with a confusing write error.
-require_space() {
-  local dir="$1" label="$2" avail
-  # Walk up to the nearest existing ancestor: /usr/local/bin may not exist
-  # yet on a clean machine.
+# nearest_existing walks up to the closest directory that exists, so a target
+# that has not been created yet can still be probed.
+nearest_existing() {
+  local dir="$1"
   while [ ! -d "$dir" ] && [ "$dir" != "/" ]; do
     dir="$(dirname "$dir")"
   done
+  printf '%s' "$dir"
+}
+
+require_space() {
+  local dir="$1" label="$2" avail
+  dir="$(nearest_existing "$dir")"
   avail="$(df -Pk "$dir" | awk 'NR==2 {print $4}')"
   if [ -n "$avail" ] && [ "$avail" -lt "$REQUIRED_KB" ]; then
     error "$label has $((avail / 1024))MB free; AgentGuard needs about $((REQUIRED_KB / 1024))MB there"
@@ -119,10 +125,24 @@ require_space() {
 # TLS is in place.
 require_https() {
   case "$1" in
-    https://*) ;;
-    http://127.0.0.1*|http://localhost*|http://\[::1\]*) ;;
+    https://*) return 0 ;;
+    http://*) ;;
     *) error "AGENTGUARD_BASE_URL must use https (got $1)" ;;
   esac
+
+  # Loopback over plaintext is fine; anything else is not. Match the host
+  # exactly, terminated by :port, /path or end of string. A prefix glob is
+  # not good enough here and was wrong when first written: http://127.0.0.1*
+  # also matches http://127.0.0.1.evil.com, and http://localhost* matches
+  # http://localhost.attacker.io, which hands a remote attacker the very
+  # downgrade this function exists to prevent.
+  local rest="${1#http://}"
+  case "$rest" in
+    127.0.0.1|127.0.0.1:*|127.0.0.1/*) return 0 ;;
+    localhost|localhost:*|localhost/*) return 0 ;;
+    "[::1]"|"[::1]:"*|"[::1]/"*) return 0 ;;
+  esac
+  error "AGENTGUARD_BASE_URL must use https (got $1)"
 }
 
 # source_label names where the binary is about to come from, so an install
@@ -143,8 +163,11 @@ source_label() {
 # prompt. Discovering that after the transfer wastes the transfer and
 # reports it as a raw sudo error, so check up front.
 require_install_access() {
-  # Already writable, or creatable by this user: no escalation needed.
-  if mkdir -p "$INSTALL_DIR" 2>/dev/null && [ -w "$INSTALL_DIR" ]; then
+  # Probe, never create: this runs before the download, and a refused
+  # install (404, checksum mismatch, wrong signing team) must not leave a
+  # directory tree behind that the user never asked for. install_binary
+  # creates the directory once there is actually something to put in it.
+  if [ -w "$(nearest_existing "$INSTALL_DIR")" ]; then
     return 0
   fi
 
@@ -246,7 +269,13 @@ verify_checksum() {
     return 0
   fi
 
-  want="$(awk -v name="$asset_name" '$2 == name {print $1; exit}' "$sums_file")"
+  # Match on the basename, after stripping the "*" that `sha256sum -b`
+  # prefixes and any directory component from generating in a dist/ tree.
+  # Exact equality on the raw field would turn a release-tooling change into
+  # a silently skipped checksum rather than a failure.
+  want="$(awk -v name="$asset_name" '
+    { f = $2; sub(/^\*/, "", f); sub(/^.*\//, "", f) }
+    f == name { print $1; exit }' "$sums_file")"
   if [ -z "$want" ]; then
     warn "$CHECKSUMS_ASSET has no entry for $asset_name -- relying on the signature check alone."
     return 0
@@ -318,21 +347,41 @@ install_binary() {
   # fresh ~/.local/bin, say) down the sudo branch, which prompts for a
   # password nobody needed and leaves a root-owned directory in the user's
   # home. Escalate only when creating or writing it genuinely fails.
+  # Stage inside INSTALL_DIR and rename over the target, rather than moving
+  # from the temp directory onto it. A move across volumes is a copy plus a
+  # truncate, so an interrupted install would leave a partial, executable
+  # binary on PATH that verification never saw; a rename within one
+  # directory is atomic, and it also leaves a running agentguard's inode
+  # alone instead of truncating it underneath the process.
+  #
+  # chmod 755 explicitly in both branches: `chmod +x` is filtered by umask,
+  # so under umask 077 the non-sudo branch would install 0700 and nothing
+  # else on the machine could run it.
+  local staged="$dest.new.$$"
   if mkdir -p "$INSTALL_DIR" 2>/dev/null && [ -w "$INSTALL_DIR" ]; then
-    mv -f "$src" "$dest"
+    if ! cp -f "$src" "$staged"; then
+      rm -f "$staged"
+      error "could not write to $INSTALL_DIR"
+    fi
+    chmod 755 "$staged"
+    mv -f "$staged" "$dest"
   else
     info "Installing to $INSTALL_DIR (requires sudo)..."
     sudo mkdir -p "$INSTALL_DIR"
-    sudo mv -f "$src" "$dest"
-    sudo chmod 755 "$dest"
+    if ! sudo cp -f "$src" "$staged"; then
+      sudo rm -f "$staged"
+      error "could not write to $INSTALL_DIR even with sudo"
+    fi
+    sudo chmod 755 "$staged"
     # mv keeps the temp file's ownership, so an elevated install would
     # otherwise leave a user-owned binary sitting in a root-owned directory
     # that is on every account's PATH: anything running as that user could
     # then replace, without a password, a binary other users and root
     # execute. Tolerate failure rather than abort a working install -- some
     # filesystems have no meaningful ownership -- but say so.
-    sudo chown root:wheel "$dest" 2>/dev/null ||
+    sudo chown root:wheel "$staged" 2>/dev/null ||
       warn "could not set root ownership on $dest; it stays writable by your user"
+    sudo mv -f "$staged" "$dest"
   fi
 
   installed_path="$dest"
@@ -366,7 +415,10 @@ main() {
   # turns a successful install's final act into an "unbound variable" error
   # and leaks the download.
   trap cleanup EXIT
-  workdir="$(mktemp -d)"
+  # Explicit template: BSD mktemp ignores $TMPDIR unless it is given one
+  # (it uses _CS_DARWIN_USER_TEMP_DIR instead), which silently defeats any
+  # caller trying to isolate where the download lands.
+  workdir="$(mktemp -d "${TMPDIR:-/tmp}/agentguard.XXXXXXXX")"
 
   require_space "$workdir" "The temporary directory ($workdir)"
   require_space "$INSTALL_DIR" "$INSTALL_DIR"
@@ -390,7 +442,17 @@ main() {
 
   install_binary "$workdir/$ASSET"
 
-  info "Installed: $("$installed_path" --version)"
+  # Capture first: a command substitution's exit status is discarded when
+  # it is used as an argument, and set -e does not apply to it either, so
+  # inlining this would report a binary that cannot execute as a successful
+  # install and exit 0 -- which any MDM or wrapper keying off the exit code
+  # would believe.
+  local version
+  if ! version="$("$installed_path" --version 2>&1)"; then
+    error "installed $installed_path but it does not run:
+  $version"
+  fi
+  info "Installed: $version"
   info "Location:  $installed_path"
 
   case ":$PATH:" in
