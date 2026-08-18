@@ -300,6 +300,14 @@ install_binary() {
     sudo mkdir -p "$INSTALL_DIR"
     sudo mv -f "$src" "$dest"
     sudo chmod 755 "$dest"
+    # mv keeps the temp file's ownership, so an elevated install would
+    # otherwise leave a user-owned binary sitting in a root-owned directory
+    # that is on every account's PATH: anything running as that user could
+    # then replace, without a password, a binary other users and root
+    # execute. Tolerate failure rather than abort a working install -- some
+    # filesystems have no meaningful ownership -- but say so.
+    sudo chown root:wheel "$dest" 2>/dev/null ||
+      warn "could not set root ownership on $dest; it stays writable by your user"
   fi
 
   installed_path="$dest"
@@ -368,7 +376,6 @@ main() {
   cat <<EOF
 
 Next steps:
-  agentguard policy add jozu.ml/jozu/agentguard-policies:vm-standard
   agentguard run claude-code --workspace ~/projects/your-app
 
 The first run extracts a ~1.5GB Linux disk image to ~/.agentguard/vm/ and
