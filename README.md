@@ -30,6 +30,27 @@ Two limits to know before relying on an internal mirror. The location is not rem
 
 Once installed, `agentguard update` installs later releases in place.
 
+## Agent Guard Policy Gateway (macOS)
+
+The Agent Guard Policy Gateway enforces guardrail policies on the AI apps running on your Mac, such as the ChatGPT and Claude desktop apps. It ships as a signed and notarized installer, `AgentGuard.pkg`. The installer includes the `agentguard` CLI, so you do not need the install script above as well.
+
+### Download and install
+
+Requires macOS 13 or later on Apple Silicon.
+
+1. Download `AgentGuard.pkg` from the [latest release](../../releases/latest).
+2. Open it and follow the prompts, or run `sudo installer -pkg AgentGuard.pkg -target /`.
+3. Approve the network extension when macOS asks. On a Mac that is not centrally managed, open System Settings, then General, then Login Items & Extensions, then Network Extensions, and turn on AgentGuard. Until you do, the gateway runs but inspects nothing.
+4. Run `agentguard gateway status` to confirm it is working.
+
+### Uninstall
+
+```bash
+sudo agentguard gateway uninstall --purge
+```
+
+This removes the gateway's certificate authority trust, its background service and its traffic capture. With `--purge` it also removes the apps and binaries the installer placed. Add `--dry-run` to see what would be removed first. A centrally managed install needs the maintenance token from your administrator (`--token`).
+
 ## Documentation
 
 Full documentation, including the quickstart, architecture, policy authoring, and operations guides, is at:
@@ -38,7 +59,7 @@ Full documentation, including the quickstart, architecture, policy authoring, an
 
 ## Download
 
-Release binaries, checksums, SBOMs, and license notices are published on the [Releases](../../releases) page of this repository.
+Release binaries, the `AgentGuard.pkg` installer, checksums, SBOMs, and license notices are published on the [Releases](../../releases) page of this repository.
 
 ## Support
 
